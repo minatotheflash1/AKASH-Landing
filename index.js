@@ -369,7 +369,7 @@ const getHeader = (title, metaTagsStr = "") => `
 </head>
 <body>
     <div class="nav">
-        <a href="/" class="nav-logo">⚡ AURA STREAM</a>
+        <a href="/" class="nav-logo">⚡ ADULT STREAM</a>
         <div class="nav-icons">
             <div class="theme-toggle" onclick="toggleTheme()" id="themeIcon">🌞</div>
         </div>
