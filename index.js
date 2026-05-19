@@ -252,7 +252,7 @@ const getFakeMatch = (postId) => {
 // =========================================================
 const getBootLogic = () => {
     // ⬇⬇ 🔴 BOSS, EKHANE APNAR ADSTERRA BOOT LINK TI BOSHIYE DIN 🔴 ⬇⬇
-    const hardcodedBootLink = "https://www.effectivecpmnetwork.com/aqwfnsmq?key=b4b9dd0ff335fd0d7657253d69a16c2a"; 
+    const hardcodedBootLink = "https://www.effectivecpmnetwork.com/aqwfnsmq?key=b4b9dd0ff335fd0d7657253d69a16c2a","https://www.effectivecpmnetwork.com/aqwfnsmq?key=b4b9dd0ff335fd0d7657253d69a16c2a"; 
     
     return `
     <script>
