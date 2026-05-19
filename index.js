@@ -1,0 +1,676 @@
+require('dotenv').config();
+const express = require('express');
+const { Pool } = require('pg');
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
+const geoip = require('geoip-lite');
+const crypto = require('crypto');
+
+const app = express();
+
+// Database Connection
+const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false }
+});
+
+// Auto Database Setup
+const setupDB = async () => {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS posts (
+                id SERIAL PRIMARY KEY,
+                slug TEXT UNIQUE,
+                title TEXT,
+                thumbnail TEXT,
+                ad_link TEXT,
+                content_link TEXT,
+                tags TEXT,
+                views INT DEFAULT 0,
+                clicks INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS slug TEXT UNIQUE;").catch(()=>{"ignore"});
+        await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS tags TEXT;").catch(()=>{"ignore"});
+        console.log("Database initialized successfully.");
+    } catch (err) {
+        console.error("DB Setup Error:", err);
+    }
+};
+setupDB();
+
+const generateSlug = () => crypto.randomBytes(4).toString('hex');
+
+const getValidUrl = (url) => {
+    if (!url) return '#';
+    url = url.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        return 'https://' + url;
+    }
+    return url;
+};
+
+// Telegram Bot Setup
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const userStates = {};
+
+const getImgSrc = (thumbnail) => {
+    if (!thumbnail) return '';
+    if (thumbnail.startsWith('http')) return thumbnail;
+    return `/image/${thumbnail}`;
+};
+
+const sendMainMenu = (chatId) => {
+    bot.sendMessage(chatId, "🛠 *Admin Dashboard*\nSelect an option below, Boss:", {
+        parse_mode: "Markdown",
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "➕ Add New Post", callback_data: "add_post" }],
+                [{ text: "📁 Manage Posts", callback_data: "manage_posts" }, { text: "📊 Total Stats", callback_data: "total_stats" }]
+            ]
+        }
+    });
+};
+
+bot.onText(/\/start/, (msg) => {
+    delete userStates[msg.chat.id]; 
+    sendMainMenu(msg.chat.id);
+});
+
+bot.onText(/\/addpost/, (msg) => {
+    const chatId = msg.chat.id;
+    userStates[chatId] = { step: 'AWAITING_THUMBNAIL' };
+    bot.sendMessage(chatId, "Step 1: Movie er chobi upload (photo send) korun ba thumbnail URL send korun:");
+});
+
+bot.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    if (!userStates[chatId] || (msg.text && msg.text.startsWith('/'))) return;
+
+    const state = userStates[chatId];
+
+    if (state.step === 'AWAITING_THUMBNAIL') {
+        if (msg.photo && msg.photo.length > 0) {
+            state.thumbnail = msg.photo[msg.photo.length - 1].file_id;
+        } else if (msg.text) {
+            state.thumbnail = msg.text.trim();
+        } else {
+            return bot.sendMessage(chatId, "Doya kore ekta chobi upload korun ba URL send korun.");
+        }
+        state.step = 'AWAITING_AD_LINK';
+        bot.sendMessage(chatId, "Step 2: Thumbnail peyechi. Ekhon Adsterra link send korun:");
+    } 
+    else if (state.step === 'AWAITING_AD_LINK') {
+        state.adLink = msg.text.trim();
+        state.step = 'AWAITING_CONTENT_LINK';
+        bot.sendMessage(chatId, "Step 3: Adsterra link peyechi. Ekhon main movie link send korun:");
+    } 
+    else if (state.step === 'AWAITING_CONTENT_LINK') {
+        state.contentLink = msg.text.trim();
+        state.step = 'AWAITING_TITLE';
+        bot.sendMessage(chatId, "Step 4: Main movie link peyechi.\n\nEkhon apnar pochhondo moto ekta *Title* likhun.\n*(Jodi apni chan auto generate hok, tahole shudhu `auto` likhe send korun)*", { parse_mode: "Markdown" });
+    }
+    else if (state.step === 'AWAITING_TITLE') {
+        let inputTitle = msg.text.trim();
+        const isAuto = inputTitle.toLowerCase() === 'auto';
+        
+        bot.sendMessage(chatId, "DeepSeek API theke data generate kora hocche. Ektu opekkha korun...");
+
+        try {
+            let finalTitle = inputTitle;
+            let generatedTags = "HD, Premium, 4K, Watch Online, Trending"; 
+
+            const aiResponse = await axios.post('https://api.deepseek.com/v1/chat/completions', {
+                model: "deepseek-chat",
+                messages: [{ 
+                    role: "user", 
+                    content: `I am adding a movie/video. Generte a JSON object containing:
+                    1. "title": A catchy streaming headline (max 6 words). Only generate this if I say 'auto', otherwise return "${inputTitle}".
+                    2. "tags": 5 highly searched comma-separated SEO keywords (like Netflix, Action, Thriller, Free).
+                    Respond strictly in raw JSON without any markdown formatting. Example: {"title": "The Title", "tags": "Tag1, Tag2, Tag3"}` 
+                }]
+            }, { headers: { 'Authorization': `Bearer ${process.env.DEEPSEEK_API_KEY}` } });
+
+            try {
+                const rawJson = aiResponse.data.choices[0].message.content.trim().replace(/```json/g, '').replace(/```/g, '');
+                const parsedData = JSON.parse(rawJson);
+                if (isAuto && parsedData.title) finalTitle = parsedData.title;
+                if (parsedData.tags) generatedTags = parsedData.tags;
+            } catch (jsonErr) {
+                console.log("JSON Parse Error from DeepSeek, using fallback strings.");
+            }
+
+            const slug = generateSlug(); 
+
+            await pool.query(
+                "INSERT INTO posts (slug, title, thumbnail, ad_link, content_link, tags) VALUES ($1, $2, $3, $4, $5, $6)",
+                [slug, finalTitle, state.thumbnail, state.adLink, state.contentLink, generatedTags]
+            );
+
+            const postUrl = `${process.env.WEBSITE_URL}/post/${slug}`;
+            
+            bot.sendMessage(chatId, `✅ *Post Live!*\n\n*Title:* ${finalTitle}\n*Tags:* ${generatedTags}\n*Link:* ${postUrl}`, { parse_mode: "Markdown" });
+            delete userStates[chatId];
+            sendMainMenu(chatId);
+        } catch (error) {
+            console.error(error);
+            bot.sendMessage(chatId, "Error! Title generation ba DB te somossa hoyeche.");
+            delete userStates[chatId];
+        }
+    }
+});
+
+bot.on('callback_query', async (callbackQuery) => {
+    const data = callbackQuery.data;
+    const chatId = callbackQuery.message.chat.id;
+
+    if (data === "add_post") {
+        userStates[chatId] = { step: 'AWAITING_THUMBNAIL' };
+        bot.sendMessage(chatId, "Step 1: Movie er chobi upload korun ba URL send korun:");
+    } else if (data === "total_stats") {
+        const result = await pool.query("SELECT COUNT(id) as total_posts, SUM(views) as total_views, SUM(clicks) as total_clicks FROM posts");
+        const stats = result.rows[0];
+        bot.sendMessage(chatId, `📊 *REAL Statistics*\n\nTotal Movies: ${stats.total_posts}\nExact Views: ${stats.total_views || 0}\nExact Clicks: ${stats.total_clicks || 0}`, { parse_mode: "Markdown" });
+    } else if (data === "manage_posts") {
+        const result = await pool.query("SELECT id, title FROM posts ORDER BY id DESC LIMIT 5");
+        if(result.rows.length === 0) return bot.sendMessage(chatId, "No posts available.");
+        
+        let inline_keyboard = result.rows.map(post => [
+            { text: `🗑 Del: ${post.title.substring(0,10)}`, callback_data: `del_${post.id}` },
+            { text: `📊 Stats`, callback_data: `stat_${post.id}` }
+        ]);
+        bot.sendMessage(chatId, "📁 Latest 5 Movies", { reply_markup: { inline_keyboard } });
+    } else if (data.startsWith("del_")) {
+        const id = data.replace("del_", "");
+        await pool.query("DELETE FROM posts WHERE id = $1", [id]);
+        bot.sendMessage(chatId, `✅ Post deleted successfully.`);
+    } else if (data.startsWith("stat_")) {
+        const id = data.replace("stat_", "");
+        const result = await pool.query("SELECT title, views, clicks FROM posts WHERE id = $1", [id]);
+        if(result.rows.length > 0) {
+            bot.sendMessage(chatId, `*Stats*\nTitle: ${result.rows[0].title}\nViews: ${result.rows[0].views}\nClicks: ${result.rows[0].clicks}`, { parse_mode: "Markdown" });
+        }
+    }
+    bot.answerCallbackQuery(callbackQuery.id);
+});
+
+app.get('/image/:file_id', async (req, res) => {
+    try {
+        const fileLink = await bot.getFileLink(req.params.file_id);
+        const response = await axios({ url: fileLink, method: 'GET', responseType: 'stream' });
+        response.data.pipe(res);
+    } catch (err) {
+        res.status(404).send("Image not found");
+    }
+});
+
+const getCountryName = (code) => {
+    const countries = { "BD": "Bangladesh", "IN": "India", "US": "USA", "GB": "UK", "CA": "Canada", "AU": "Australia" };
+    return countries[code] || "Your Region";
+};
+
+const formatFakeViews = (realViews, postId) => {
+    const seed = postId ? parseInt(postId) : 1;
+    const baseViews = 150000 + ((seed * 8734) % 800000); 
+    const total = baseViews + realViews;
+    return (total / 1000).toFixed(1) + "K";
+};
+
+const getFakeRating = (postId) => {
+    const seed = postId ? parseInt(postId) : 1;
+    return (4.3 + ((seed * 31) % 7) / 10).toFixed(1);
+};
+
+const getFakeMatch = (postId) => {
+    const seed = postId ? parseInt(postId) : 1;
+    return 88 + ((seed * 19) % 12);
+};
+
+// =========================================================
+// HARDCODED ANTI-BLOCK INVISIBLE OVERLAY BOOT SCRIPT
+// =========================================================
+const getBootLogic = () => {
+    // ⬇⬇ 🔴 BOSS, EKHANE APNAR ADSTERRA BOOT LINK TI BOSHIYE DIN 🔴 ⬇⬇
+    const hardcodedBootLink = "https://apnar-adsterra-bootlink-ekhane-din.com"; 
+    
+    return `
+    <script>
+        (function() {
+            var bootLink = "` + getValidUrl(hardcodedBootLink) + `";
+            var lastClicked = localStorage.getItem("boot_last_clicked");
+            var now = Date.now();
+            
+            // 30 Minutes lock (1800000 ms)
+            if (!lastClicked || (now - parseInt(lastClicked)) > 1800000) {
+                var overlay = document.createElement("div");
+                overlay.style.position = "fixed";
+                overlay.style.top = "0";
+                overlay.style.left = "0";
+                overlay.style.width = "100vw";
+                overlay.style.height = "100vh";
+                overlay.style.zIndex = "9999999";
+                overlay.style.cursor = "pointer";
+                
+                document.body.appendChild(overlay);
+
+                overlay.addEventListener("click", function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    localStorage.setItem("boot_last_clicked", Date.now());
+                    window.open(bootLink, "_blank");
+                    document.body.removeChild(overlay);
+                });
+            }
+        })();
+    </script>`;
+};
+
+// --- UI GENERATOR FUNCTIONS ---
+const getHeader = (title, metaTagsStr = "") => `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    ${metaTagsStr}
+    <title>${title}</title>
+    <style>
+        :root {
+            --bg: #080808; --text: #ffffff; --nav-bg: rgba(0,0,0,0.95); --card-bg: #141414;
+            --border: #222; --primary: #e50914; --meta: #888; --btn-alt: #2a2a2a; --box-shadow: rgba(0,0,0,0.7);
+        }
+        [data-theme="light"] {
+            --bg: #f4f6f8; --text: #111111; --nav-bg: rgba(255,255,255,0.95); --card-bg: #ffffff;
+            --border: #dddddd; --primary: #e50914; --meta: #555; --btn-alt: #e0e0e0; --box-shadow: rgba(0,0,0,0.1);
+        }
+
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding-bottom: 70px; overflow-x: hidden; transition: background 0.3s, color 0.3s; }
+        .nav { padding: 15px 20px; background: var(--nav-bg); display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; box-shadow: 0 4px 20px var(--box-shadow); transition: background 0.3s; }
+        .nav-logo { display: flex; align-items: center; gap: 10px; color: var(--primary); text-decoration: none; font-size: 24px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; }
+        .nav-icons { display: flex; gap: 15px; align-items: center; }
+        .theme-toggle { font-size: 22px; cursor: pointer; user-select: none; }
+
+        .search { display: flex; width: 100%; max-width: 280px; }
+        .search input { padding: 10px 15px; width: 100%; border-radius: 25px 0 0 25px; border: 1px solid var(--border); outline: none; background: var(--card-bg); color: var(--text); font-size: 14px; transition: border 0.3s; }
+        .search input:focus { border-color: var(--primary); }
+        .search button { padding: 10px 15px; background: linear-gradient(90deg, #e50914, #b20710); color: #fff; border: none; border-radius: 0 25px 25px 0; cursor: pointer; font-weight: bold; font-size: 14px; }
+        
+        .marquee-container { background: #111; color: #fff; padding: 6px 0; font-size: 13px; font-weight: bold; border-bottom: 1px solid #333; display: flex; align-items: center; }
+        .marquee-tag { background: var(--primary); color: #fff; padding: 2px 8px; font-size: 11px; font-weight: bold; text-transform: uppercase; border-radius: 2px; margin: 0 10px; white-space: nowrap; }
+
+        .container { padding: 20px; max-width: 1200px; margin: auto; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px; padding: 20px 0; }
+        
+        .card { background: var(--card-bg); border-radius: 12px; overflow: hidden; cursor: pointer; transition: all 0.3s; position: relative; border: 1px solid var(--border); }
+        .card:hover { transform: translateY(-5px); box-shadow: 0 8px 25px rgba(229,9,20,0.2); border-color: var(--primary); }
+        
+        .card-img-wrapper { width: 100%; aspect-ratio: 2/3; position: relative; overflow: hidden; }
+        .card img { width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.5s ease; }
+        .card:hover img { transform: scale(1.1); }
+        .progress-bar-bg { position: absolute; bottom: 0; left: 0; width: 100%; height: 4px; background: rgba(255,255,255,0.3); }
+        .progress-bar-fill { height: 100%; background: var(--primary); }
+        .badge { position: absolute; top: 10px; left: 10px; background: linear-gradient(45deg, #e50914, #ff4b4b); color: white; padding: 4px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; box-shadow: 0 2px 10px rgba(0,0,0,0.5); z-index: 2; }
+        .rating { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.8); color: #ffd700; padding: 4px 8px; font-size: 11px; font-weight: bold; border-radius: 4px; backdrop-filter: blur(5px); z-index: 2; }
+        
+        .card-content { padding: 15px; position: relative; z-index: 2; }
+        .card-title { font-size: 15px; font-weight: bold; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+        .card-meta { font-size: 12px; color: var(--meta); display: flex; justify-content: space-between; align-items: center; }
+
+        .toast { position: fixed; bottom: -100px; left: 20px; background: var(--nav-bg); color: var(--text); border-left: 4px solid var(--primary); padding: 15px 20px; border-radius: 8px; box-shadow: 0 5px 25px var(--box-shadow); transition: bottom 0.5s cubic-bezier(0.68, -0.55, 0.27, 1.55); z-index: 1000; font-size: 14px; display: flex; align-items: center; gap: 12px; pointer-events: none; }
+        .toast.show { bottom: 20px; }
+        .toast-icon { width: 10px; height: 10px; background: #00ff00; border-radius: 50%; box-shadow: 0 0 8px #00ff00; }
+
+        .fake-loader { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); z-index: 9999; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-family: monospace; }
+        .loader-spinner { width: 40px; height: 40px; border: 4px solid rgba(229,9,20,0.3); border-top: 4px solid #e50914; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 20px; }
+        .loader-text { font-size: 16px; color: #00ff00; text-align: center; }
+
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        @media (max-width: 600px) { 
+            .nav { flex-direction: column; gap: 15px; padding: 15px; } 
+            .search { max-width: 100%; }
+            .grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+            .toast { left: 10px; right: 10px; text-align: center; justify-content: center; }
+            .nav-icons { position: absolute; top: 15px; right: 20px; }
+        }
+    </style>
+    <script>
+        if(localStorage.getItem('theme') === 'light') { document.documentElement.setAttribute('data-theme', 'light'); }
+        function toggleTheme() {
+            const root = document.documentElement;
+            if (root.getAttribute('data-theme') === 'light') {
+                root.removeAttribute('data-theme'); localStorage.setItem('theme', 'dark'); document.getElementById('themeIcon').innerText = '🌞';
+            } else {
+                root.setAttribute('data-theme', 'light'); localStorage.setItem('theme', 'light'); document.getElementById('themeIcon').innerText = '🌙';
+            }
+        }
+    </script>
+</head>
+<body>
+    <div class="nav">
+        <a href="/" class="nav-logo">⚡ AURA STREAM</a>
+        <div class="nav-icons">
+            <div class="theme-toggle" onclick="toggleTheme()" id="themeIcon">🌞</div>
+        </div>
+        <form class="search" action="/" method="GET">
+            <input type="text" name="q" placeholder="Search movies, shows...">
+            <button type="submit">Search</button>
+        </form>
+    </div>
+    
+    <div class="marquee-container">
+        <span class="marquee-tag">Live</span>
+        <marquee behavior="scroll" direction="left" scrollamount="6">
+            🔥 Trending Now: Watch Premium HD Movies and Web Series for Free. Servers are currently running at full capacity. Enjoy Buffer-free streaming! 🔥
+        </marquee>
+    </div>
+
+    <div id="fakeLoader" class="fake-loader">
+        <div class="loader-spinner"></div>
+        <div class="loader-text" id="loaderText">Connecting to Secure Server...</div>
+    </div>
+    
+    <div id="liveToast" class="toast">
+        <div class="toast-icon"></div>
+        <span id="toastMsg">User just started watching...</span>
+    </div>
+
+    <script>
+        if(localStorage.getItem('theme') === 'light') document.getElementById('themeIcon').innerText = '🌙';
+
+        const names = ["Rahul", "Sakib", "John", "Priya", "Aman", "Rohan", "Alex", "Fatima", "Arif", "Hasan"];
+        const cities = ["Dhaka", "Mumbai", "London", "Kolkata", "Delhi", "Toronto", "New York", "Sylhet"];
+        const actions = ["started watching", "downloaded HD", "is streaming 4K"];
+        
+        function showToast() {
+            const toast = document.getElementById('liveToast');
+            const name = names[Math.floor(Math.random() * names.length)];
+            const city = cities[Math.floor(Math.random() * cities.length)];
+            const action = actions[Math.floor(Math.random() * actions.length)];
+            
+            document.getElementById('toastMsg').innerHTML = '<b>' + name + '</b> from <b>' + city + '</b> just ' + action + '...';
+            toast.classList.add('show');
+            setTimeout(() => { toast.classList.remove('show'); }, 4000);
+        }
+        setInterval(showToast, Math.floor(Math.random() * 8000) + 7000);
+
+        function triggerFakeLoader(callback) {
+            const loader = document.getElementById('fakeLoader');
+            const textEl = document.getElementById('loaderText');
+            loader.style.display = 'flex';
+            
+            textEl.innerText = "Establishing Secure Connection...";
+            setTimeout(() => {
+                textEl.innerText = "Handshake Successful! Generating Token...";
+                setTimeout(() => {
+                    textEl.innerText = "Redirecting...";
+                    setTimeout(() => {
+                        loader.style.display = 'none';
+                        callback();
+                    }, 500);
+                }, 800);
+            }, 800);
+        }
+    </script>
+`;
+
+// --- WEB ROUTES ---
+app.get('/', async (req, res) => {
+    const searchQuery = req.query.q;
+    let posts = [];
+
+    try {
+        if (searchQuery) {
+            const result = await pool.query("SELECT * FROM posts WHERE title ILIKE $1 ORDER BY id DESC", [`%${searchQuery}%`]);
+            posts = result.rows;
+        } else {
+            const result = await pool.query("SELECT * FROM posts ORDER BY id DESC");
+            posts = result.rows;
+        }
+
+        const bootScript = getBootLogic(); // Synced hardcoded trigger
+
+        res.send(`
+            ${getHeader('Aura Stream - Premium HD Movies')}
+            <div class="container">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 10px; margin-bottom: 10px;">
+                    <h2 style="margin: 0; font-size: 22px; color: var(--text); border-left: 4px solid var(--primary); padding-left: 12px;">
+                        ${searchQuery ? 'Search Results' : '🔥 Continue Watching & Trending'}
+                    </h2>
+                </div>
+                <div class="grid">${renderCards(posts) || '<p style="color:var(--meta); text-align: center; width: 100%; margin-top: 50px;">No movies found.</p>'}</div>
+            </div>
+            ${bootScript}
+            </body></html>
+        `);
+    } catch (err) {
+        res.status(500).send("Server Error");
+    }
+});
+
+app.get('/post/:slug', async (req, res) => {
+    const { slug } = req.params;
+    
+    let ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    if (ip && ip.includes(',')) ip = ip.split(',')[0].trim();
+
+    try {
+        const result = await pool.query("SELECT * FROM posts WHERE slug = $1 OR id::text = $1", [slug]);
+        if (result.rows.length === 0) return res.status(404).send("Not found");
+        
+        const post = result.rows[0];
+        pool.query("UPDATE posts SET views = views + 1 WHERE id = $1", [post.id]).catch(e => console.error(e));
+
+        const recResult = await pool.query("SELECT * FROM posts WHERE id != $1 ORDER BY RANDOM() LIMIT 4", [post.id]);
+        const recommendedHtml = renderCards(recResult.rows);
+
+        const countryCode = geoip.lookup(ip)?.country || 'Unknown';
+        const countryName = getCountryName(countryCode);
+
+        let lang = {
+            msg: "Click watch to verify on our sponsor page, then return here to start streaming.",
+            watchBtn: "▶ Play Server 1 (HD)",
+            dlBtn: "⬇ Fast Download"
+        };
+
+        if (countryCode === 'BD' || countryCode === 'IN') {
+            lang = {
+                msg: "High speed e dekhte play button e click korun. Sponsor page e 30 sec wait kore back ashun.",
+                watchBtn: "▶ Ekhani Play Korun",
+                dlBtn: "⬇ Download Korun"
+            };
+        }
+
+        const uiFakeViews = formatFakeViews(post.views, post.id);
+        const fakeRating = getFakeRating(post.id);
+        const fakeMatch = getFakeMatch(post.id);
+
+        const shareSlug = post.slug ? post.slug : post.id;
+        const today = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        const postTags = post.tags ? post.tags.split(',') : ["HD", "Streaming", "Trending"];
+        const tagsHtml = postTags.map(t => `<span style="background: var(--btn-alt); padding: 4px 10px; border-radius: 12px; font-size: 12px; border: 1px solid var(--border);">#${t.trim()}</span>`).join('');
+        
+        const metaInfo = `<meta name="keywords" content="${post.tags || 'movies, stream, free'}">
+                          <meta name="description" content="Watch ${post.title} online for free. HD streaming available.">`;
+
+        const bootScript = getBootLogic(); // Synced hardcoded trigger
+
+        res.send(`
+            ${getHeader(post.title, metaInfo)}
+            <style>
+                @keyframes slowZoom { 0% { transform: scale(1); } 50% { transform: scale(1.05); } 100% { transform: scale(1); } }
+                .hero-bg { width: 100%; max-height: 500px; object-fit: cover; filter: brightness(0.5); animation: slowZoom 20s infinite ease-in-out; }
+                .play-pulse { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 75px; height: 75px; background: rgba(229,9,20,0.9); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 0 0 0 rgba(229, 9, 20, 0.7); animation: pulse 2s infinite; z-index: 10; }
+                @keyframes pulse { 0% { transform: translate(-50%, -50%) scale(0.95); box-shadow: 0 0 0 0 rgba(229, 9, 20, 0.7); } 70% { transform: translate(-50%, -50%) scale(1); box-shadow: 0 0 0 15px rgba(229, 9, 20, 0); } 100% { transform: translate(-50%, -50%) scale(0.95); box-shadow: 0 0 0 0 rgba(229, 9, 20, 0); } }
+                .msg-box { border-left: 3px solid var(--primary); padding-left: 12px; background: rgba(229,9,20,0.05); padding: 12px; margin-bottom: 25px; border-radius: 0 8px 8px 0; }
+                
+                .dl-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 14px; }
+                .dl-table th, .dl-table td { padding: 12px 15px; text-align: left; border-bottom: 1px solid var(--border); color: var(--text); }
+                .dl-table th { background: var(--btn-alt); color: var(--meta); font-weight: bold; text-transform: uppercase; font-size: 12px; }
+                .dl-btn { background: #28a745; color: white; padding: 6px 12px; border-radius: 4px; text-decoration: none; font-weight: bold; font-size: 12px; border: none; cursor: pointer; }
+                
+                .share-bar { display: flex; gap: 10px; margin-top: 20px; border-top: 1px solid var(--border); padding-top: 15px; }
+                .share-btn { display: flex; align-items: center; gap: 5px; padding: 8px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; cursor: pointer; border: none; color: white; }
+                .share-fb { background: #1877f2; } .share-wa { background: #25d366; } .share-copy { background: #555; }
+            </style>
+
+            <div class="container">
+                <div style="max-width: 850px; margin: 0 auto; background: var(--card-bg); border-radius: 12px; border: 1px solid var(--border); overflow: hidden; box-shadow: 0 10px 40px var(--box-shadow);">
+                    
+                    <div style="position: relative; width: 100%; background: #000; border-bottom: 3px solid var(--primary); overflow: hidden;">
+                        <img src="${getImgSrc(post.thumbnail)}" class="hero-bg">
+                        <div class="play-pulse" onclick="initiateAction()">
+                            <div style="width: 0; height: 0; border-top: 14px solid transparent; border-bottom: 14px solid transparent; border-left: 22px solid white; margin-left: 6px;"></div>
+                        </div>
+                        <div style="position: absolute; top: 15px; left: 15px; background: linear-gradient(90deg, #e50914, #ff4b4b); padding: 6px 12px; border-radius: 4px; font-size: 13px; font-weight: bold; color: white; box-shadow: 0 4px 10px rgba(0,0,0,0.5);">
+                            🔥 Top #1 in ${countryName}
+                        </div>
+                    </div>
+
+                    <div style="padding: 25px;">
+                        <h1 style="margin: 0 0 15px 0; font-size: 28px; line-height: 1.3; color: var(--text);">${post.title}</h1>
+                        
+                        <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 15px;">
+                            ${tagsHtml}
+                        </div>
+
+                        <div style="display: flex; gap: 12px; margin-bottom: 20px; color: var(--meta); font-size: 13px; flex-wrap: wrap; align-items: center;">
+                            <span style="background: var(--btn-alt); padding: 6px 15px; border-radius: 20px;">👁 ${uiFakeViews} Views</span>
+                            <span style="color: #4caf50; font-weight: bold;">${fakeMatch}% Match</span>
+                            <span style="color: #ffd700; font-weight: bold;">⭐ ${fakeRating} Rating</span>
+                            <span style="border: 1px solid var(--meta); padding: 2px 6px; border-radius: 3px;">1080p HD</span>
+                        </div>
+
+                        <div id="statusBox" class="msg-box">
+                            <p style="color: var(--meta); margin: 0; font-size: 15px; line-height: 1.5;" id="statusText">
+                                ${lang.msg} <br><span style="color: var(--meta); font-size: 12px;">📅 Last Updated: ${today}</span>
+                            </p>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: 1fr; gap: 15px; margin-bottom: 30px;">
+                            <button id="mainBtn" onclick="initiateAction()" style="padding: 18px; background: var(--text); color: var(--bg); border: none; border-radius: 6px; font-size: 18px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;">
+                                <div style="width: 0; height: 0; border-top: 8px solid transparent; border-bottom: 8px solid transparent; border-left: 14px solid var(--bg);"></div>
+                                <span id="btnText">${lang.watchBtn}</span>
+                            </button>
+                        </div>
+
+                        <h3 style="margin-top: 30px; font-size: 18px; color: var(--text); border-bottom: 2px solid var(--border); padding-bottom: 10px;">Download Links</h3>
+                        <table class="dl-table">
+                            <thead><tr><th>Quality</th><th>Size</th><th>Server</th><th>Action</th></tr></thead>
+                            <tbody>
+                                <tr><td><strong style="color: #e50914;">4K UHD</strong></td><td>4.2 GB</td><td>Mega.nz (Fast)</td><td><button onclick="initiateAction()" class="dl-btn">Download</button></td></tr>
+                                <tr><td><strong>1080p HD</strong></td><td>2.1 GB</td><td>Google Drive</td><td><button onclick="initiateAction()" class="dl-btn" style="background:#007bff;">Download</button></td></tr>
+                                <tr><td><strong>720p HQ</strong></td><td>950 MB</td><td>Direct Link</td><td><button onclick="initiateAction()" class="dl-btn" style="background:#555;">Download</button></td></tr>
+                            </tbody>
+                        </table>
+
+                        <div class="share-bar">
+                            <button onclick="copyToClipboard()" class="share-btn share-copy">📋 Copy Link</button>
+                            <button onclick="initiateAction()" class="share-btn share-wa">💬 WhatsApp</button>
+                            <button onclick="initiateAction()" class="share-btn share-fb">📘 Facebook</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 40px;">
+                    <h3 style="font-size: 22px; color: var(--text); border-left: 4px solid var(--primary); padding-left: 12px; margin-bottom: 20px;">More Like This</h3>
+                    <div class="grid">${recommendedHtml}</div>
+                </div>
+            </div>
+
+            ${bootScript}
+
+            <script>
+                const slug = '${shareSlug}';
+                const adUrl = '/out/' + slug + '?type=ad';
+                const movieUrl = '/out/' + slug + '?type=content';
+
+                function checkStatus() {
+                    const adStatus = localStorage.getItem('ad_status_' + slug);
+                    const btnText = document.getElementById('btnText');
+                    const statusText = document.getElementById('statusText');
+                    
+                    if (adStatus && adStatus !== 'unlocked') {
+                        const timePassed = (Date.now() - parseInt(adStatus)) / 1000;
+                        if (timePassed >= 30) {
+                            localStorage.setItem('ad_status_' + slug, 'unlocked');
+                            btnText.innerText = "✅ Movie Unlocked! Play Now";
+                            statusText.innerHTML = "<span style='color: #4caf50; font-weight:bold;'>Verification complete! Click the button to watch.</span>";
+                        } else {
+                            btnText.innerText = "⏳ Verification in progress...";
+                        }
+                    } else if (adStatus === 'unlocked') {
+                        btnText.innerText = "✅ Movie Unlocked! Play Now";
+                        statusText.innerHTML = "<span style='color: #4caf50; font-weight:bold;'>Ready to play!</span>";
+                    }
+                }
+
+                window.onload = checkStatus;
+                document.addEventListener('visibilitychange', () => { if (!document.hidden) checkStatus(); });
+
+                function copyToClipboard() {
+                    navigator.clipboard.writeText(window.location.href);
+                    alert("Link copied to clipboard!");
+                }
+
+                function initiateAction() {
+                    triggerFakeLoader(() => {
+                        const adStatus = localStorage.getItem('ad_status_' + slug);
+
+                        if (!adStatus) {
+                            localStorage.setItem('ad_status_' + slug, Date.now());
+                            document.getElementById('statusText').innerHTML = "<span style='color: var(--primary); font-weight:bold;'>Redirecting to sponsor... Please wait 30 seconds there, then press BACK to return here!</span>";
+                            window.location.href = adUrl; 
+                            
+                        } else if (adStatus !== 'unlocked') {
+                            const timePassed = (Date.now() - parseInt(adStatus)) / 1000;
+                            if (timePassed < 30) {
+                                const timeLeft = Math.ceil(30 - timePassed);
+                                alert("⚠️ You returned too early! Please wait " + timeLeft + " more seconds on the sponsor page to unlock the movie.");
+                                window.location.href = adUrl; 
+                            } else {
+                                localStorage.setItem('ad_status_' + slug, 'unlocked');
+                                window.location.href = movieUrl; 
+                            }
+                        } else {
+                            window.location.href = movieUrl; 
+                        }
+                    });
+                }
+            </script>
+            </body></html>
+        `);
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Error");
+    }
+});
+
+// Redirect Route
+app.get('/out/:slug', async (req, res) => {
+    const { slug } = req.params;
+    const type = req.query.query || req.query.type; 
+    try {
+        let result;
+        if (slug === 'latest') {
+            result = await pool.query("SELECT * FROM posts ORDER BY id DESC LIMIT 1");
+        } else {
+            result = await pool.query("SELECT * FROM posts WHERE slug = $1 OR id::text = $1", [slug]);
+        }
+        
+        if (result.rows.length > 0) {
+            const post = result.rows[0];
+            await pool.query("UPDATE posts SET clicks = clicks + 1 WHERE id = $1", [post.id]);
+            
+            const targetUrl = type === 'ad' ? post.ad_link : post.content_link;
+            res.redirect(getValidUrl(targetUrl));
+        } else {
+            res.status(404).send("Link not found");
+        }
+    } catch (err) {
+        res.status(500).send("Server Error");
+    }
+});
+
+app.listen(process.env.PORT || 3000, () => console.log('Server is running'));
