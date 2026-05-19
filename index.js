@@ -31,6 +31,12 @@ const setupDB = async () => {
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        `);
         await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS slug TEXT UNIQUE;").catch(()=>{"ignore"});
         await pool.query("ALTER TABLE posts ADD COLUMN IF NOT EXISTS tags TEXT;").catch(()=>{"ignore"});
         console.log("Database initialized successfully.");
@@ -53,6 +59,20 @@ const getValidUrl = (url) => {
 
 // Telegram Bot Setup
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
+// ==========================================
+// ANTI-CRASH TELEGRAM ERROR HANDLER (FIXED)
+// ==========================================
+bot.on('polling_error', (error) => {
+    // Eita terminal e ajotha error spam kora theke bchabe ebong server crash thekabe
+    if (error.code && error.code.includes('ETELEGRAM')) return;
+    console.log(`[Telegram Silent Alert]: ${error.message || error}`);
+});
+
+bot.on('error', (error) => {
+    console.error('[Bot Critical Error]:', error.message);
+});
+
 const userStates = {};
 
 const getImgSrc = (thumbnail) => {
@@ -415,6 +435,35 @@ const getHeader = (title, metaTagsStr = "") => `
     </script>
 `;
 
+const renderCards = (posts) => {
+    return posts.map(post => {
+        const fakeViews = formatFakeViews(post.views, post.id);
+        const fakeRating = getFakeRating(post.id);
+        const postLink = post.slug ? post.slug : post.id; 
+        const randomProgress = Math.floor(Math.random() * 60) + 20; 
+        
+        return `
+        <div class="card" onclick="window.location.href='/post/${postLink}'">
+            <div class="badge">4K ULTRA</div>
+            <div class="rating">⭐ ${fakeRating}</div>
+            <div class="card-img-wrapper">
+                <img src="${getImgSrc(post.thumbnail)}" alt="poster" loading="lazy">
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" style="width: ${randomProgress}%;"></div>
+                </div>
+            </div>
+            <div class="card-content">
+                <div class="card-title">${post.title}</div>
+                <div class="card-meta">
+                    <span>👁 ${fakeViews}</span>
+                    <span style="background: var(--btn-alt); padding: 2px 6px; border-radius: 3px; font-size: 10px; color: var(--text);">CC / EN</span>
+                </div>
+            </div>
+        </div>
+        `;
+    }).join('');
+};
+
 // --- WEB ROUTES ---
 app.get('/', async (req, res) => {
     const searchQuery = req.query.q;
@@ -429,7 +478,7 @@ app.get('/', async (req, res) => {
             posts = result.rows;
         }
 
-        const bootScript = getBootLogic(); // Synced hardcoded trigger
+        const bootScript = getBootLogic(); 
 
         res.send(`
             ${getHeader('Aura Stream - Premium HD Movies')}
@@ -445,6 +494,7 @@ app.get('/', async (req, res) => {
             </body></html>
         `);
     } catch (err) {
+        console.error("Home Route Error:", err);
         res.status(500).send("Server Error");
     }
 });
@@ -494,7 +544,7 @@ app.get('/post/:slug', async (req, res) => {
         const metaInfo = `<meta name="keywords" content="${post.tags || 'movies, stream, free'}">
                           <meta name="description" content="Watch ${post.title} online for free. HD streaming available.">`;
 
-        const bootScript = getBootLogic(); // Synced hardcoded trigger
+        const bootScript = getBootLogic(); 
 
         res.send(`
             ${getHeader(post.title, metaInfo)}
@@ -642,8 +692,8 @@ app.get('/post/:slug', async (req, res) => {
             </body></html>
         `);
     } catch (err) {
-        console.error(err);
-        res.status(500).send("Error");
+        console.error("Post Route Error:", err);
+        res.status(500).send("Server Error");
     }
 });
 
@@ -669,6 +719,7 @@ app.get('/out/:slug', async (req, res) => {
             res.status(404).send("Link not found");
         }
     } catch (err) {
+        console.error("Out Route Error:", err);
         res.status(500).send("Server Error");
     }
 });
