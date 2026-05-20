@@ -60,11 +60,7 @@ const getValidUrl = (url) => {
 // Telegram Bot Setup
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-// ==========================================
-// ANTI-CRASH TELEGRAM ERROR HANDLER (FIXED)
-// ==========================================
 bot.on('polling_error', (error) => {
-    // Eita terminal e ajotha error spam kora theke bchabe ebong server crash thekabe
     if (error.code && error.code.includes('ETELEGRAM')) return;
     console.log(`[Telegram Silent Alert]: ${error.message || error}`);
 });
@@ -248,21 +244,32 @@ const getFakeMatch = (postId) => {
 };
 
 // =========================================================
-// HARDCODED ANTI-BLOCK INVISIBLE OVERLAY BOOT SCRIPT
+// SEQUENTIAL DOUBLE BOOTLINK LOGIC (INVISIBLE OVERLAY)
 // =========================================================
 const getBootLogic = () => {
-    // ⬇⬇ 🔴 BOSS, EKHANE APNAR ADSTERRA BOOT LINK TI BOSHIYE DIN 🔴 ⬇⬇
-    const hardcodedBootLink = "https://www.effectivecpmnetwork.com/frdcc5tt?key=eb74a3263961d6a2dd0b1af92384fab6"; 
+    // ⬇⬇ 🔴 BOSS, EKHANE APNAR DUITA ADSTERRA BOOT LINK BOSHIYE DIN 🔴 ⬇⬇
+    const bootLink1 = "https://www.effectivecpmnetwork.com/frdcc5tt?key=eb74a3263961d6a2dd0b1af92384fab6"; 
+    const bootLink2 = "https://blessingrecordpleasant.com/fy96v96a?key=b70bdc721419dbdf06b8519545508509"; 
     
     return `
     <script>
         (function() {
-            var bootLink = "` + getValidUrl(hardcodedBootLink) + `";
-            var lastClicked = localStorage.getItem("boot_last_clicked");
+            var link1 = "` + getValidUrl(bootLink1) + `";
+            var link2 = "` + getValidUrl(bootLink2) + `";
+            
+            var clickCount = parseInt(localStorage.getItem("boot_click_count") || "0");
+            var lastReset = parseInt(localStorage.getItem("boot_last_reset") || "0");
             var now = Date.now();
             
-            // 30 Minutes lock (1800000 ms)
-            if (!lastClicked || (now - parseInt(lastClicked)) > 1800000) {
+            // 30 Minutes lock (1800000 ms) - Reset memory if 30 mins have passed
+            if (!lastReset || (now - lastReset) > 1800000) {
+                clickCount = 0;
+                localStorage.setItem("boot_last_reset", now.toString());
+                localStorage.setItem("boot_click_count", "0");
+            }
+            
+            // Jodi click count 2 er kom hoy, tahole invisible porda toiri korbe
+            if (clickCount < 2) {
                 var overlay = document.createElement("div");
                 overlay.style.position = "fixed";
                 overlay.style.top = "0";
@@ -277,9 +284,30 @@ const getBootLogic = () => {
                 overlay.addEventListener("click", function(e) {
                     e.preventDefault();
                     e.stopPropagation();
-                    localStorage.setItem("boot_last_clicked", Date.now());
-                    window.open(bootLink, "_blank");
-                    document.body.removeChild(overlay);
+                    
+                    var currentCount = parseInt(localStorage.getItem("boot_click_count") || "0");
+                    
+                    if (currentCount < 2) {
+                        // Decide which link to open
+                        var targetLink = (currentCount === 0) ? link1 : link2;
+                        
+                        // Update memory
+                        localStorage.setItem("boot_click_count", (currentCount + 1).toString());
+                        localStorage.setItem("boot_last_reset", Date.now().toString());
+                        
+                        // Open the Boot Link
+                        window.open(targetLink, "_blank");
+                        
+                        // Remove overlay so user can interact with site
+                        document.body.removeChild(overlay);
+                        
+                        // Jodi eta first click hoy, 1 second por abar overlay add kore dibo for Link 2
+                        if (currentCount === 0) {
+                            setTimeout(function() {
+                                document.body.appendChild(overlay);
+                            }, 1000);
+                        }
+                    }
                 });
             }
         })();
@@ -369,7 +397,7 @@ const getHeader = (title, metaTagsStr = "") => `
 </head>
 <body>
     <div class="nav">
-        <a href="/" class="nav-logo">⚡ ADULT STREAM</a>
+        <a href="/" class="nav-logo">⚡ AURA STREAM</a>
         <div class="nav-icons">
             <div class="theme-toggle" onclick="toggleTheme()" id="themeIcon">🌞</div>
         </div>
