@@ -261,8 +261,8 @@ const getFakeMatch = (postId) => {
 // SEQUENTIAL DOUBLE BOOTLINK LOGIC
 // =========================================================
 const getBootLogic = () => {
-    const bootLink1 = "https://apnar-adsterra-bootlink-1-ekhane-din.com"; 
-    const bootLink2 = "https://apnar-adsterra-bootlink-2-ekhane-din.com"; 
+    const bootLink1 = "https://www.effectivecpmnetwork.com/frdcc5tt?key=eb74a3263961d6a2dd0b1af92384fab6"; 
+    const bootLink2 = "https://blessingrecordpleasant.com/fy96v96a?key=b70bdc721419dbdf06b8519545508509"; 
     
     return `
     <script>
