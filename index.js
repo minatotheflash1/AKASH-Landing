@@ -262,7 +262,7 @@ const getFakeMatch = (postId) => {
 // =========================================================
 const getBootLogic = () => {
     const bootLink1 = "https://blessingrecordpleasant.com/fy96v96a?key=b70bdc721419dbdf06b8519545508509"; 
-    const bootLink2 = "https://blessingrecordpleasant.com/fy96v96a?key=b70bdc721419dbdf06b8519545508509"; 
+    const bootLink2 = "https://www.effectivecpmnetwork.com/aqwfnsmq?key=b4b9dd0ff335fd0d7657253d69a16c2a"; 
     
     return `
     <script>
